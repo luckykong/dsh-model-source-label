@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Local scratch
+*.local.*

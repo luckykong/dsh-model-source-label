@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Source Label",
+    "description": "Shows which source each model comes from beside its name in the model selector, and lets you give every source a short custom label."
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "dsh-model-source-label",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Shows each model's provider (source) beside its name in the composer model selector, with a short custom label per source.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "model-selector",
+    "ui"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luckykong/dsh-model-source-label.git"
+  },
+  "homepage": "https://github.com/luckykong/dsh-model-source-label#readme",
+  "bugs": {
+    "url": "https://github.com/luckykong/dsh-model-source-label/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  }
+}

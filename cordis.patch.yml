@@ -1,0 +1,5 @@
+# Model source label bundle: one Host row (empty Host half) whose Client module
+# contributes the composer model label and its settings page.
+- insert:
+    - id: model-source-label
+      name: 'dsh-model-source-label'
