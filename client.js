@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
     const NS = 'model-source-label'
     const LABELS_KEY = 'dsh-model-source-label:labels'
     const SEEN_KEY = 'dsh-model-source-label:seen'
+    const STORAGE_LOCK = 'dsh-model-source-label:storage'
     const MAX_LABEL_LENGTH = 16
     const MAX_SEEN = 200
 
@@ -29,6 +30,8 @@ window.__ModuleLoader__.load({
       addLabelPlaceholder: '简称（可选）',
       addButton: '添加',
       hint: '简称保存在本机浏览器中，修改后立即生效。',
+      saving: '正在保存来源设置…',
+      storageError: '来源设置未能保存到浏览器。修改目前仅在本页生效，刷新后可能丢失；请检查浏览器存储权限或可用空间，再尝试修改。',
       colLabel: '简称',
     }
     const DICT_EN = {
@@ -41,28 +44,55 @@ window.__ModuleLoader__.load({
       addLabelPlaceholder: 'Short label (optional)',
       addButton: 'Add',
       hint: 'Labels are stored in this browser and apply immediately.',
+      saving: 'Saving source settings…',
+      storageError: 'Source settings could not be saved in this browser. Changes only apply to this page and may be lost on reload. Check storage permissions or available space, then try editing again.',
       colLabel: 'Label',
     }
 
     // ---------------------------------------------------------------------
     // Tiny persisted store (localStorage + useSyncExternalStore)
     // ---------------------------------------------------------------------
+    function dictionary() {
+      return Object.create(null)
+    }
+
+    function copyDictionary(value) {
+      return Object.assign(dictionary(), value)
+    }
+
     function readObject(key) {
       try {
         const raw = window.localStorage.getItem(key)
-        if (raw === null) return {}
-        const parsed = JSON.parse(raw)
-        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+        const result = dictionary()
+        if (raw === null) return { value: result, ok: true }
+        let parsed
+        try {
+          parsed = JSON.parse(raw)
+        } catch (error) {
+          return { value: result, ok: true }
+        }
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          Object.keys(parsed).forEach(function validateEntry(id) {
+            // Provider IDs are opaque; do not silently merge distinct keys.
+            if (id.trim() === '' || id !== id.trim() || typeof parsed[id] !== 'string') return
+            const value = key === LABELS_KEY
+              ? parsed[id].slice(0, MAX_LABEL_LENGTH)
+              : parsed[id].trim().slice(0, 80)
+            if (value.trim() !== '') result[id] = value
+          })
+        }
+        return { value: result, ok: true }
       } catch (error) {
-        return {}
+        return { value: dictionary(), ok: false }
       }
     }
 
     function writeObject(key, value) {
       try {
         window.localStorage.setItem(key, JSON.stringify(value))
+        return true
       } catch (error) {
-        /* private mode or quota: keep the in-memory value */
+        return false
       }
     }
 
@@ -71,10 +101,18 @@ window.__ModuleLoader__.load({
       return value.replace(/\s+/g, ' ').trim().slice(0, MAX_LABEL_LENGTH)
     }
 
+    const initialLabels = readObject(LABELS_KEY)
+    const initialSeen = readObject(SEEN_KEY)
     let state = {
-      labels: readObject(LABELS_KEY),
-      seen: readObject(SEEN_KEY),
+      labels: initialLabels.value,
+      seen: trimSeen(initialSeen.value, initialLabels.value),
+      storageError: !initialLabels.ok || !initialSeen.ok,
+      saving: false,
     }
+    let pendingLabels = dictionary()
+    let pendingSeen = dictionary()
+    let saving = false
+    let stopped = true
     const listeners = new Set()
 
     function getSnapshot() {
@@ -88,8 +126,17 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function commit(labels, seen) {
-      state = { labels: labels, seen: seen }
+    function sameDictionary(left, right) {
+      const keys = Object.keys(left)
+      return keys.length === Object.keys(right).length && keys.every(function sameValue(id) {
+        return Object.prototype.hasOwnProperty.call(right, id) && left[id] === right[id]
+      })
+    }
+
+    function commit(labels, seen, storageError, isSaving) {
+      if (sameDictionary(labels, state.labels) && sameDictionary(seen, state.seen)
+        && storageError === state.storageError && isSaving === state.saving) return
+      state = { labels: labels, seen: seen, storageError: storageError, saving: isSaving }
       listeners.forEach(function notify(listener) {
         try {
           listener()
@@ -99,17 +146,88 @@ window.__ModuleLoader__.load({
       })
     }
 
+    function trimSeen(seen, labels) {
+      const result = copyDictionary(seen)
+      const keys = Object.keys(result)
+      // Prefer keeping display names for sources with a custom label. The
+      // editor also lists labels whose history record has been evicted.
+      const evict = keys.filter(function withoutLabel(id) {
+        return !Object.prototype.hasOwnProperty.call(labels, id)
+      }).concat(keys.filter(function withLabel(id) {
+        return Object.prototype.hasOwnProperty.call(labels, id)
+      }))
+      for (let i = 0; i < keys.length - MAX_SEEN; i += 1) delete result[evict[i]]
+      return result
+    }
+
+    function mergeChanges(base, changes) {
+      const result = copyDictionary(base)
+      Object.keys(changes).forEach(function applyChange(id) {
+        if (changes[id] === null) delete result[id]
+        else result[id] = changes[id]
+      })
+      return result
+    }
+
+    function hasPendingChanges() {
+      return Object.keys(pendingLabels).length > 0 || Object.keys(pendingSeen).length > 0
+    }
+
+    function synchronize() {
+      const labels = readObject(LABELS_KEY)
+      const seen = readObject(SEEN_KEY)
+      const mergedLabels = mergeChanges(labels.ok ? labels.value : state.labels, pendingLabels)
+      commit(mergedLabels,
+        trimSeen(mergeChanges(seen.ok ? seen.value : state.seen, pendingSeen), mergedLabels),
+        !labels.ok || !seen.ok || (hasPendingChanges() && state.storageError), hasPendingChanges())
+    }
+
+    function persistPendingChanges() {
+      if (stopped) return
+      const latestLabels = readObject(LABELS_KEY)
+      const latestSeen = readObject(SEEN_KEY)
+      let failed = !latestLabels.ok || !latestSeen.ok
+      const labels = mergeChanges(latestLabels.ok ? latestLabels.value : state.labels, pendingLabels)
+      const seen = trimSeen(mergeChanges(latestSeen.ok ? latestSeen.value : state.seen, pendingSeen), labels)
+      // Never replace an unreadable store with an empty snapshot. Keep failed
+      // edits pending so a later edit or storage event can retry them.
+      if (Object.keys(pendingLabels).length > 0 && latestLabels.ok) {
+        if (writeObject(LABELS_KEY, labels)) pendingLabels = dictionary()
+        else failed = true
+      }
+      if (Object.keys(pendingSeen).length > 0 && latestSeen.ok) {
+        if (writeObject(SEEN_KEY, seen)) pendingSeen = dictionary()
+        else failed = true
+      }
+      commit(labels, seen, failed, hasPendingChanges())
+    }
+
+    function queueSave() {
+      if (saving || stopped || !hasPendingChanges()) return
+      saving = true
+      Promise.resolve().then(function saveUnderLock() {
+        if (stopped) return
+        const locks = window.navigator && window.navigator.locks
+        return locks && typeof locks.request === 'function'
+          ? locks.request(STORAGE_LOCK, persistPendingChanges)
+          : persistPendingChanges()
+      }).catch(function saveFailed() {
+        if (!stopped) commit(state.labels, state.seen, true, hasPendingChanges())
+      }).finally(function saveFinished() {
+        saving = false
+        if (!state.storageError) queueSave()
+      })
+    }
+
     function setLabel(providerId, value) {
       const id = typeof providerId === 'string' ? providerId.trim() : ''
       if (id === '') return
       // Keep the raw draft (a trailing space while typing must survive); only
       // the emptiness check is trimmed, and reads collapse whitespace later.
       const raw = typeof value === 'string' ? value.slice(0, MAX_LABEL_LENGTH) : ''
-      const labels = Object.assign({}, state.labels)
-      if (raw.trim() === '') delete labels[id]
-      else labels[id] = raw
-      writeObject(LABELS_KEY, labels)
-      commit(labels, state.seen)
+      pendingLabels[id] = raw.trim() === '' ? null : raw
+      synchronize()
+      queueSave()
     }
 
     function recordSeenProvider(provider) {
@@ -119,15 +237,13 @@ window.__ModuleLoader__.load({
       const name = typeof provider.name === 'string' && provider.name.trim() !== ''
         ? provider.name.trim().slice(0, 80)
         : id
-      if (state.seen[id] === name) return
-      const seen = Object.assign({}, state.seen)
-      seen[id] = name
-      const keys = Object.keys(seen)
-      if (keys.length > MAX_SEEN) {
-        for (let i = 0; i < keys.length - MAX_SEEN; i += 1) delete seen[keys[i]]
+      if (state.seen[id] === name) {
+        queueSave()
+        return
       }
-      writeObject(SEEN_KEY, seen)
-      commit(state.labels, seen)
+      pendingSeen[id] = name
+      synchronize()
+      queueSave()
     }
 
     function useStore() {
@@ -403,8 +519,8 @@ window.__ModuleLoader__.load({
       const error = errorState[0]
       const setError = errorState[1]
 
-      const ids = Object.keys(seen).sort(function byName(left, right) {
-        return String(seen[left]).localeCompare(String(seen[right]))
+      const ids = Array.from(new Set(Object.keys(seen).concat(Object.keys(labels)))).sort(function byName(left, right) {
+        return (seen[left] || left).localeCompare(seen[right] || right) || left.localeCompare(right)
       })
 
       function addSource() {
@@ -422,6 +538,11 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { className: 'dsh-msl-editor', style: EDITOR_STYLE },
+        snapshot.storageError
+          ? h('p', { role: 'alert', style: Object.assign({}, HINT_STYLE, {
+            color: 'var(--dsw-alias-state-error-primary, #d93026)',
+          }) }, t('storageError'))
+          : snapshot.saving ? h('p', { role: 'status', style: HINT_STYLE }, t('saving')) : null,
         ids.length === 0
           ? h('p', { style: HINT_STYLE }, t('empty'))
           : h('ul', { style: LIST_STYLE }, ids.map(function renderRow(id) {
@@ -498,6 +619,30 @@ window.__ModuleLoader__.load({
         ctx.effect(function installDictionaries() {
           return locale.register(NS, { zh: DICT_ZH, en: DICT_EN })
         }, 'model-source-label: dictionaries')
+
+        ctx.effect(function installStorageSync() {
+          stopped = false
+          synchronize()
+          queueSave()
+          function onStorage(event) {
+            if (event.key !== null && event.key !== LABELS_KEY && event.key !== SEEN_KEY) return
+            try {
+              if (event.storageArea !== null && event.storageArea !== window.localStorage) return
+            } catch (error) {
+              // Accessing localStorage itself can throw when permission changes.
+              synchronize()
+              return
+            }
+            // Read current storage rather than replaying possibly stale events.
+            synchronize()
+            queueSave()
+          }
+          window.addEventListener('storage', onStorage)
+          return function removeStorageSync() {
+            stopped = true
+            window.removeEventListener('storage', onStorage)
+          }
+        }, 'model-source-label: storage sync')
 
         // Replace the composer's inline model label with model name + source.
         // A single slot renders its LOWEST-priority live entry (the shipped

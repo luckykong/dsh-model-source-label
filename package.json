@@ -1,7 +1,14 @@
 {
   "name": "dsh-model-source-label",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check client.js && node --check index.js && node --test"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  },
   "description": "Shows each model's provider (source) beside its name in the composer model selector, with a short custom label per source.",
   "keywords": [
     "dsh",
@@ -31,7 +38,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "docs/review-and-fixes.md"
   ],
   "dsh": {
     "bundle": {
